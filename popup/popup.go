@@ -19,6 +19,12 @@ type Result struct {
 	Merged bool
 }
 
+type key struct {
+	target string
+	source string
+	kind   string
+}
+
 // Ledger 是飘字台账。
 type Ledger struct {
 	MergeMs   int64
@@ -27,7 +33,8 @@ type Ledger struct {
 
 	seq     int
 	order   []*Entry
-	seen    map[string]int
+	byKey   map[key]*Entry
+	seen    map[string]Result
 	Dropped int
 	Scanned int
 }
@@ -35,28 +42,38 @@ type Ledger struct {
 // Add 写入一条飘字事件，返回该条飘字当前的序号与累计金额。
 func (l *Ledger) Add(eventID, target, source, kind string, atMs int64, amount int) Result {
 	if l.seen == nil {
-		l.seen = map[string]int{}
+		l.seen = map[string]Result{}
 	}
-	l.seen[eventID] = l.seq
+	if prev, ok := l.seen[eventID]; ok {
+		return prev
+	}
 
-	var hit *Entry
-	for _, e := range l.order {
-		l.Scanned++
-		if e.Target == target {
-			hit = e
-		}
-	}
-	if hit != nil {
+	var res Result
+	k := key{target: target, source: source, kind: kind}
+	if hit := l.byKey[k]; hit != nil && hit.Stack < l.MaxStack && atMs-hit.AtMs <= l.MergeMs {
 		hit.Amount += amount
 		hit.Stack++
 		hit.AtMs = atMs
-		return Result{Seq: hit.Seq, Amount: hit.Amount, Merged: true}
+		res = Result{Seq: hit.Seq, Amount: hit.Amount, Merged: true}
+	} else {
+		if l.MaxPopups > 0 && len(l.order) >= l.MaxPopups {
+			oldest := l.order[0]
+			l.order = l.order[1:]
+			delete(l.byKey, key{oldest.Target, oldest.Source, oldest.Kind})
+			l.Dropped++
+		}
+		l.seq++
+		e := &Entry{Seq: l.seq, Target: target, Source: source, Kind: kind, Amount: amount, Stack: 1, AtMs: atMs}
+		l.order = append(l.order, e)
+		if l.byKey == nil {
+			l.byKey = map[key]*Entry{}
+		}
+		l.byKey[k] = e
+		res = Result{Seq: e.Seq, Amount: e.Amount}
 	}
 
-	l.seq++
-	e := &Entry{Seq: l.seq, Target: target, Source: source, Kind: kind, Amount: amount, Stack: 1, AtMs: atMs}
-	l.order = append(l.order, e)
-	return Result{Seq: e.Seq, Amount: e.Amount}
+	l.seen[eventID] = res
+	return res
 }
 
 // Active 返回当前活跃飘字条数。
